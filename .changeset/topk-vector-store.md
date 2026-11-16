@@ -20,7 +20,7 @@ const results = await topk.query({
 });
 ```
 
-- Pass `new TopKVector()` to `Memory` with no `embedder` for semantic recall embedded by TopK.
+- Pass `new TopKVector({ id: 'topk' })` to `Memory` with no `embedder` for semantic recall embedded by TopK.
 - Indexes with a `dimension` take your own embeddings and work with `createVectorQueryTool`.
 - Search modes: semantic, BM25 keyword, vector, sparse, multi-vector (MaxSim) and hybrid, plus custom scoring expressions.
 - Partitions per tenant (`withPartition()`), and read consistency per store or per query.

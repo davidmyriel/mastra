@@ -350,7 +350,7 @@ Messages are stored as text and MongoDB embeds them, so the model choice and the
 
 MongoDB embeds newly written messages in the background. A message saved moments ago may not be recallable immediately.
 
-[TopK](/integrations/vectors/topk) embeds text on its servers by default, so a `TopKVector` needs no model option. A semantic index holds at most 4,096 characters per document, so set `maxChunkChars` to 4,000 or less:
+[TopK](/integrations/vectors/topk) embeds text on its servers by default, so a `TopKVector` needs no model option:
 
 ```typescript title="src/mastra/agents/index.ts"
 import { LibSQLStore } from '@mastra/libsql'
@@ -361,7 +361,7 @@ const memory = new Memory({
   storage: new LibSQLStore({ id: 'agent-storage', url: 'file:./mastra.db' }),
   vector: new TopKVector({ id: 'agent-vector' }),
   options: {
-    semanticRecall: { topK: 3, messageRange: 2, maxChunkChars: 4000 },
+    semanticRecall: { topK: 3, messageRange: 2 },
   },
 })
 ```

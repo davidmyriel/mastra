@@ -71,6 +71,12 @@ describeLive('TopKVector Integration Tests', () => {
       expect(store.isSelfEmbedding).toBe(true);
     });
 
+    it('runs semantic search alone for queryText, without BM25', async () => {
+      const [semantic] = await store.query({ indexName, queryText: 'warranty', mode: 'semantic', topK: 1 });
+      const [inferred] = await store.query({ indexName, queryText: 'warranty', topK: 1 });
+      expect(inferred?.score).toBeCloseTo(semantic!.score, 5);
+    });
+
     it('describes a collection TopK embeds itself', async () => {
       const stats = await store.describeIndex({ indexName });
       expect(stats).toEqual({ dimension: 0, count: 4 });
@@ -133,8 +139,21 @@ describeLive('TopKVector Integration Tests', () => {
       expect(results[0]?.metadata).toEqual({ source: 'billing.md', year: 2022 });
     });
 
-    it('rejects text longer than a semantic index accepts', async () => {
-      await expect(store.upsert({ indexName, documents: ['x'.repeat(5000)] })).rejects.toThrow(/at most 4096/);
+    it('embeds long text, such as a default-size Memory chunk', async () => {
+      const filler = 'The weather report mentions clouds and light wind over the hills. ';
+      await store.upsert({
+        indexName,
+        ids: ['long'],
+        documents: [filler.repeat(240) + 'The launch code for project Falcon is BLUE-77.'],
+        metadata: [{ source: 'notes.md' }],
+      });
+      const results = await store.query({ indexName, queryText: 'what is the Falcon launch code?', topK: 1 });
+      expect(results[0]?.id).toBe('long');
+      await store.deleteVector({ indexName, id: 'long' });
+    });
+
+    it('explains text that is too long for a semantic index', async () => {
+      await expect(store.upsert({ indexName, documents: ['x'.repeat(40_000)] })).rejects.toThrow(/split long text/);
     });
 
     it('rejects vectors in a collection TopK embeds itself', async () => {

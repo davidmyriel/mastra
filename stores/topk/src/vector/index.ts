@@ -39,9 +39,6 @@ const STORE = 'TOPK';
 /** TopK returns at most this many results from one query. */
 export const TOPK_MAX_RESULTS = 10_000;
 
-/** The longest text a `semantic` index accepts in one document. */
-export const TOPK_MAX_SEMANTIC_TEXT_LENGTH = 4_096;
-
 /** Target size of one upsert request, well under TopK's 8MB limit. */
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
@@ -58,7 +55,7 @@ const TOPK_METRICS: Record<Metric, 'cosine' | 'euclidean' | 'dot_product'> = {
 /**
  * Index created on the `text` field of a new collection.
  * - `semantic`: TopK embeds and reranks the text on the server, and also indexes it for BM25.
- *   At most 4,096 characters per document.
+ *   TopK limits the text of one document (32,768 characters at the time of writing).
  * - `keyword`: BM25 keyword search only, with no length limit beyond the document size.
  * - `none`: the text is stored and returned, but isn't searchable.
  */
@@ -123,7 +120,8 @@ export interface TopKVectorConfig {
   consistency?: TopKConsistency;
   /**
    * Make reads see this store's own latest write to the same index and partition, by passing
-   * that write's LSN. Applies to reads that set neither `lsn` nor `consistency`. Defaults to `true`.
+   * that write's LSN. Applies when neither the call nor the store sets `consistency` and the call
+   * sets no `lsn`. Defaults to `true`.
    */
   readYourWrites?: boolean;
 }
@@ -404,7 +402,8 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
       const info = await this.requireInfo(indexName, 'DESCRIBE_INDEX');
       let count = 0;
       try {
-        count = await this.collection(indexName, params.partition).count(this.readOptions(indexName, params));
+        const options = this.readOptions(indexName, params);
+        count = await this.read(() => this.collection(indexName, params.partition).count(options));
       } catch (error) {
         if (!hasMessage(error, 'partition not found')) throw error;
       }
@@ -559,13 +558,6 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
         if (docText === undefined && !vectors && !sparseVectors && !multiVectors) {
           throw userError('MISSING_DOCUMENT', `Document at index ${i} has no text to search`);
         }
-        if (info.textIndex === 'semantic' && docText !== undefined && docText.length > TOPK_MAX_SEMANTIC_TEXT_LENGTH) {
-          throw userError(
-            'TEXT_TOO_LONG',
-            `Document at index ${i} has ${docText.length} characters, but a semantic index accepts at most ${TOPK_MAX_SEMANTIC_TEXT_LENGTH}. ` +
-              'Split it into smaller chunks (for Memory, set semanticRecall.maxChunkChars: 4000), or use textIndex: "keyword".',
-          );
-        }
         const { row, size } = buildRow({
           id: outIds[i]!,
           metadata: meta,
@@ -579,7 +571,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
       }
 
       if (deleteFilter && !this.translator.isEmptyFilter(deleteFilter)) {
-        const expr = this.translator.translate(deleteFilter);
+        const expr = this.translateFilter(deleteFilter);
         if (expr) await this.deleteWhere(indexName, params.partition, expr);
       }
       await this.write(indexName, params.partition, rows, sizes);
@@ -626,22 +618,13 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
           `Vector has ${update.vector.length} dimensions, but index "${indexName}" has ${info.dimension}`,
         );
       }
-      if (
-        update.document !== undefined &&
-        info.textIndex === 'semantic' &&
-        update.document.length > TOPK_MAX_SEMANTIC_TEXT_LENGTH
-      ) {
-        throw userError(
-          'TEXT_TOO_LONG',
-          `A semantic index accepts at most ${TOPK_MAX_SEMANTIC_TEXT_LENGTH} characters per document`,
-        );
-      }
 
-      const ids = id ? [id] : await this.idsWhere(indexName, params, this.translator.translate(filter)!);
+      const ids = id ? [id] : await this.idsWhere(indexName, params, this.translateFilter(filter)!);
       if (ids.length === 0) {
         this.logger?.info(`No vectors matched the update in ${indexName}`);
         return;
       }
+      let updated = 0;
 
       // TopK's update() merges structs field by field, which can't remove metadata keys. To replace
       // metadata, read each document and write it back whole.
@@ -658,6 +641,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
         for (const docId of batch) {
           const existing = found[docId];
           if (!existing) continue;
+          updated++;
           const oldMetadata = readMetadata(existing);
           const newMetadata = update.metadata ?? oldMetadata;
           let docText =
@@ -673,13 +657,16 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
             metadata: newMetadata,
             text: docText,
             vector: update.vector ?? (existing[TOPK_FIELDS.vector] as number[] | undefined),
-            sparse: toSparse(existing[TOPK_FIELDS.sparseVector]),
-            multi: existing[TOPK_FIELDS.multiVector] as number[][] | undefined,
+            sparse: existing[TOPK_FIELDS.sparseVector],
+            multi: existing[TOPK_FIELDS.multiVector],
           });
           rows.push(row);
           sizes.push(size);
         }
         if (rows.length > 0) await this.write(indexName, params.partition, rows, sizes);
+      }
+      if (id && updated === 0) {
+        this.logger?.warn(`No document with id "${id}" in ${indexName}, so nothing was updated`);
       }
     } catch (error) {
       throw this.wrap(error, 'UPDATE_VECTOR', { indexName, ...(id ? { id } : {}) });
@@ -717,7 +704,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
           await this.deleteWhere(indexName, partition, ids.slice(start, start + 1000).map(String));
         }
       } else {
-        await this.deleteWhere(indexName, partition, this.translator.translate(filter)!);
+        await this.deleteWhere(indexName, partition, this.translateFilter(filter)!);
       }
     } catch (error) {
       throw this.wrap(error, 'DELETE_VECTORS', { indexName, ...(ids ? { idsCount: ids.length } : {}) });
@@ -729,9 +716,10 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Searches an index. Pass `queryText` for semantic search embedded on the server, `queryVector`
-   * for your own embeddings, both (or `mode: 'hybrid'`) to combine them with BM25 in one query, or
-   * only a `filter` to list matching documents. See {@link TopKQueryVectorParams}.
+   * Searches an index. Pass `queryText` for semantic search embedded on the server (BM25 in an
+   * index without a semantic text index), `queryVector` for your own embeddings, several inputs or
+   * `mode: 'hybrid'` to combine scores, including BM25, in one query, or only a `filter` to list
+   * matching documents. See {@link TopKQueryVectorParams}.
    *
    * Scores are higher-is-better. Semantic and BM25 scores aren't normalized; for euclidean vector
    * search the score is `1 / (1 + distance)`.
@@ -754,7 +742,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
 
       const info = await this.requireInfo(indexName, 'QUERY');
       const plan = this.planQuery(indexName, info, params);
-      const metadataFilter = this.translator.translate(filter);
+      const metadataFilter = this.translateFilter(filter);
 
       let q = select({
         ...(plan.score ? { score: plan.score } : {}),
@@ -770,7 +758,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
       const options = this.readOptions(indexName, params);
       let rows: Row[];
       try {
-        rows = await this.collection(indexName, params.partition).query(q, options);
+        rows = await this.read(() => this.collection(indexName, params.partition).query(q, options));
       } catch (error) {
         if (hasMessage(error, 'partition not found')) return [];
         throw error;
@@ -856,10 +844,27 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
       throw userError('MISSING_SIGNAL', `${signal} search needs input: ${why[signal]}`);
     };
 
+    // Every input the caller passed must be usable by this index, or the query would silently
+    // ignore it (and, with nothing left, list arbitrary documents).
+    if ((queryText || params.keywordQuery) && info.textIndex === 'none') {
+      throw userError('MISSING_SIGNAL', `Index "${indexName}" has no text index, so queryText can't be searched`);
+    }
+    if (sparseVector && !info.sparse) requireSignal('sparse');
+    if (multiVector && info.multiVectorDimension === undefined) requireSignal('multiVector');
+
+    // Without a mode, each input counts once: queryText means semantic search in a semantic
+    // index and BM25 otherwise. Several inputs make a hybrid query.
+    const inferred: TopKSignal[] = [];
+    if (queryText) inferred.push(info.textIndex === 'semantic' ? 'semantic' : 'keyword');
+    else if (params.keywordQuery && info.textIndex !== 'none') inferred.push('keyword');
+    if (queryVector) inferred.push('vector');
+    if (sparseVector) inferred.push('sparse');
+    if (multiVector) inferred.push('multiVector');
+
     let resolved: TopKSearchMode | undefined = mode;
     if (!resolved && !scoring) {
-      if (weights || available.length > 1) resolved = 'hybrid';
-      else resolved = available[0];
+      if (weights || inferred.length > 1) resolved = 'hybrid';
+      else resolved = inferred[0];
     }
     if (mode && !['semantic', 'keyword', 'vector', 'sparse', 'multiVector', 'hybrid'].includes(mode)) {
       throw userError('INVALID_MODE', `Unknown mode "${mode}"`);
@@ -886,7 +891,8 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
         signals = (Object.keys(weights) as TopKSignal[]).filter(key => weights[key] !== 0);
         signals.forEach(requireSignal);
       } else {
-        signals = available;
+        signals = mode === 'hybrid' ? available : inferred;
+        signals.forEach(requireSignal);
       }
       if (signals.length === 0) throw userError('MISSING_SIGNAL', 'hybrid search needs at least one query input');
     } else {
@@ -967,6 +973,14 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
   // Helpers
   // ---------------------------------------------------------------------------
 
+  private translateFilter(filter: TopKVectorFilter | undefined): query.LogicalExpression | undefined {
+    try {
+      return this.translator.translate(filter);
+    } catch (error) {
+      throw new TopKInputError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   private collectionName(indexName: string): string {
     return `${this.config.indexPrefix ?? ''}${indexName}`;
   }
@@ -980,19 +994,37 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
     return `${indexName}\u0000${partition ?? ''}`;
   }
 
+  /**
+   * Read options, in order of precedence: the call's `lsn`, the call's `consistency`, the store's
+   * `consistency`, then (with `readYourWrites`) the LSN of this store's latest write.
+   */
   private readOptions(indexName: string, params: TopKReadParams): QueryOptions | undefined {
     if (params.lsn) return { lsn: params.lsn };
     if (params.consistency) return { consistency: params.consistency };
+    if (this.config.consistency) return { consistency: this.config.consistency };
     if (this.config.readYourWrites !== false) {
       const lsn = this.shared.lsns.get(this.lsnKey(indexName, params.partition ?? this.partition));
       if (lsn) return { lsn };
     }
-    if (this.config.consistency) return { consistency: this.config.consistency };
     return undefined;
   }
 
+  /** Keeps the highest LSN, so writes that finish out of order can't move it back. */
   private recordLsn(indexName: string, partition: string | undefined, lsn: string) {
-    if (lsn) this.shared.lsns.set(this.lsnKey(indexName, partition ?? this.partition), lsn);
+    if (!lsn) return;
+    const key = this.lsnKey(indexName, partition ?? this.partition);
+    const previous = this.shared.lsns.get(key);
+    if (!previous || compareLsn(lsn, previous) > 0) this.shared.lsns.set(key, lsn);
+  }
+
+  /** Runs a read, retrying once when TopK hasn't indexed the requested LSN in time. */
+  private async read<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (!hasMessage(error, 'querylsntimeout')) throw error;
+      return run();
+    }
   }
 
   private forget(indexName: string) {
@@ -1039,23 +1071,32 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
     fields: string[],
   ): Promise<Record<string, Row>> {
     try {
-      return await this.collection(indexName, params.partition).get(ids, fields, this.readOptions(indexName, params));
+      const options = this.readOptions(indexName, params);
+      return await this.read(() => this.collection(indexName, params.partition).get(ids, fields, options));
     } catch (error) {
       if (hasMessage(error, 'partition not found')) return {};
       throw error;
     }
   }
 
-  /** IDs of every document matching a filter, read in pages of 10,000 (TopK's query limit). */
+  /**
+   * IDs of every document matching a filter. A query returns at most 10,000 results, so this
+   * pages by ID: each page asks for IDs after the last one seen.
+   */
   private async idsWhere(indexName: string, params: TopKReadParams, expr: query.LogicalExpression): Promise<string[]> {
     const ids: string[] = [];
     const options = this.readOptions(indexName, params);
-    for (let offset = 0; ; offset += TOPK_MAX_RESULTS) {
+    let after: string | undefined;
+    for (;;) {
+      let page = select({}).filter(expr);
+      if (after !== undefined) page = page.filter(field('_id').gt(after));
       let rows: Row[];
       try {
-        rows = await this.collection(indexName, params.partition).query(
-          select({}).filter(expr).sort(field('_id'), true).offset(offset).limit(TOPK_MAX_RESULTS),
-          options,
+        rows = await this.read(() =>
+          this.collection(indexName, params.partition).query(
+            page.sort(field('_id'), true).limit(TOPK_MAX_RESULTS),
+            options,
+          ),
         );
       } catch (error) {
         if (hasMessage(error, 'partition not found')) return ids;
@@ -1063,6 +1104,7 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
       }
       ids.push(...rows.map(r => String(r._id)));
       if (rows.length < TOPK_MAX_RESULTS) return ids;
+      after = ids[ids.length - 1];
     }
   }
 
@@ -1156,20 +1198,49 @@ export class TopKVector extends MastraVector<TopKVectorFilter> {
   private wrap(error: unknown, operation: string, details: Record<string, any> = {}): MastraError {
     if (error instanceof MastraError) return error;
     const message = error instanceof Error ? error.message : String(error);
+    if (hasMessage(error, 'collection not found')) {
+      // The collection was deleted elsewhere: drop the cached schema so the next call sees it.
+      if (typeof details.indexName === 'string') this.forget(details.indexName);
+      return new MastraError(
+        {
+          id: createVectorErrorId(STORE, operation, 'INDEX_NOT_FOUND'),
+          domain: ErrorDomain.MASTRA_VECTOR,
+          category: ErrorCategory.USER,
+          text: `Index "${details.indexName ?? ''}" not found. Create it with createIndex() first.`,
+          details,
+        },
+        error,
+      );
+    }
     const user =
-      /DocumentValidationError|SchemaValidationError|invalid argument|Unsupported|requires|must|Filter|filter|operator/i.test(
-        message,
-      ) && !/permission denied|unauthenticated/i.test(message);
+      error instanceof TopKInputError ||
+      /DocumentValidationError|SchemaValidationError|invalid argument/i.test(message);
+    const hint = /TextTooLong/.test(message)
+      ? ' A semantic index limits the text of each document; split long text into smaller chunks (for Memory, lower semanticRecall.maxChunkChars), or use textIndex: "keyword".'
+      : '';
     return new MastraError(
       {
         id: createVectorErrorId(STORE, operation, 'FAILED'),
         domain: ErrorDomain.MASTRA_VECTOR,
         category: user ? ErrorCategory.USER : ErrorCategory.THIRD_PARTY,
-        text: message,
+        text: `${message}${hint}`,
         details,
       },
       error,
     );
+  }
+}
+
+/** Invalid input found by this package (filters, metadata, vectors), reported with the USER category. */
+class TopKInputError extends Error {}
+
+function compareLsn(a: string, b: string): number {
+  try {
+    const x = BigInt(a);
+    const y = BigInt(b);
+    return x > y ? 1 : x < y ? -1 : 0;
+  } catch {
+    return a === b ? 0 : 1;
   }
 }
 
@@ -1187,8 +1258,10 @@ function buildRow(input: {
   metadata: Record<string, any> | null | undefined;
   text?: string;
   vector?: number[];
-  sparse?: SparseVector;
-  multi?: number[][];
+  /** Mastra's `{ indices, values }`, or a sparse vector as `get()` returns it. */
+  sparse?: unknown;
+  /** Rows of numbers, or a matrix as `get()` returns it. */
+  multi?: unknown;
 }): { row: Row; size: number } {
   const json = toJson(input.metadata ?? {});
   const parsed = JSON.parse(json) as Record<string, unknown>;
@@ -1203,7 +1276,8 @@ function buildRow(input: {
     [TOPK_FIELDS.metadataKeys]: stringList(keys),
     [TOPK_FIELDS.metadataSizes]: sizes,
   };
-  let size = 256 + input.id.length + json.length * 2 + keys.join('').length;
+  // The metadata is sent twice (struct and JSON), and keys once more.
+  let size = 256 + Buffer.byteLength(input.id) + Buffer.byteLength(json) * 2 + Buffer.byteLength(keys.join(''));
   if (input.text !== undefined) {
     row[TOPK_FIELDS.text] = input.text;
     size += Buffer.byteLength(input.text);
@@ -1213,25 +1287,32 @@ function buildRow(input: {
     size += input.vector.length * 12;
   }
   if (input.sparse) {
-    row[TOPK_FIELDS.sparseVector] = f32SparseVector(sparseRecord(input.sparse));
-    size += input.sparse.indices.length * 16;
+    const record = toSparseRecord(input.sparse);
+    row[TOPK_FIELDS.sparseVector] = record ? f32SparseVector(record) : input.sparse;
+    size += record ? Object.keys(record).length * 16 : 64 * 1024;
   }
   if (input.multi) {
-    row[TOPK_FIELDS.multiVector] = matrix(input.multi, 'f32');
-    size += input.multi.reduce((sum, r) => sum + r.length * 12, 0);
+    if (Array.isArray(input.multi)) {
+      row[TOPK_FIELDS.multiVector] = matrix(input.multi as number[][], 'f32');
+      size += (input.multi as number[][]).reduce((sum, r) => sum + r.length * 12, 0);
+    } else {
+      // Already a topk-js Matrix, passed back unchanged.
+      row[TOPK_FIELDS.multiVector] = input.multi;
+      size += 256 * 1024;
+    }
   }
   return { row, size };
 }
 
 function toJson(metadata: Record<string, any>): string {
   if (typeof metadata !== 'object' || Array.isArray(metadata)) {
-    throw new Error('metadata must be an object');
+    throw new TopKInputError('metadata must be an object');
   }
   let json: string | undefined;
   try {
     json = JSON.stringify(metadata);
   } catch (error) {
-    throw new Error(`metadata must be JSON-serializable: ${(error as Error).message}`);
+    throw new TopKInputError(`metadata must be JSON-serializable: ${(error as Error).message}`);
   }
   return json ?? '{}';
 }
@@ -1280,23 +1361,33 @@ function readMetadata(row: Row): Record<string, any> {
 
 function sparseRecord(vector: SparseVector): Record<number, number> {
   if (!vector || vector.indices.length !== vector.values.length) {
-    throw new Error('A sparse vector needs as many indices as values');
+    throw new TopKInputError('A sparse vector needs as many indices as values');
   }
   const record: Record<number, number> = {};
   vector.indices.forEach((index, i) => {
     const value = vector.values[i]!;
     if (!Number.isInteger(index) || index < 0 || !Number.isFinite(value)) {
-      throw new Error('Sparse vector indices must be non-negative integers and values finite numbers');
+      throw new TopKInputError('Sparse vector indices must be non-negative integers and values finite numbers');
     }
     record[index] = value;
   });
   return record;
 }
 
-function toSparse(value: unknown): SparseVector | undefined {
+/**
+ * A sparse vector as a `{ index: value }` record: from Mastra's `{ indices, values }`, or from the
+ * plain object `get()` returns. `undefined` for a topk-js SparseVector, which is passed through.
+ */
+function toSparseRecord(value: unknown): Record<number, number> | undefined {
   if (!value || typeof value !== 'object') return undefined;
-  const entries = Object.entries(value as Record<string, number>);
-  return { indices: entries.map(([k]) => Number(k)), values: entries.map(([, v]) => v) };
+  const v = value as Partial<SparseVector>;
+  if (Array.isArray(v.indices) && Array.isArray(v.values)) return sparseRecord(v as SparseVector);
+  if (Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const record: Record<number, number> = {};
+  for (const [k, n] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof n === 'number') record[Number(k)] = n;
+  }
+  return record;
 }
 
 function parseSchema(schema: Record<string, CollectionFieldSpec>): CollectionInfo {

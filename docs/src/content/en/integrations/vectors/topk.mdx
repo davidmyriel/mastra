@@ -85,7 +85,7 @@ const results = await topk.query({
 // [{ id: 'refunds', score: 5.2, document: 'Refunds are issued...', metadata: { source: 'billing.md', year: 2024 } }, ...]
 ```
 
-The index uses TopK's `semantic_index()`, which also indexes the text for BM25, so the same index serves [keyword](#keyword-search) and [hybrid](#hybrid-search) queries. Each document holds at most 4,096 characters of text, so split longer text into chunks first. Semantic scores aren't normalized and are higher for closer matches.
+The index uses TopK's `semantic_index()`, which also indexes the text for BM25, so the same index serves [keyword](#keyword-search) and [hybrid](#hybrid-search) queries. `queryText` on its own runs semantic search; set `mode: 'hybrid'` to add the BM25 score. Semantic scores aren't normalized and are higher for closer matches. TopK limits the text of one document in a semantic index (32,768 characters at the time of writing), so split longer text into chunks.
 
 See the [TopK semantic search guide](https://docs.topk.io/guides/semantic-search).
 
@@ -111,15 +111,13 @@ export const supportAgent = new Agent({
       semanticRecall: {
         topK: 3,
         messageRange: 2,
-        // A semantic index holds at most 4,096 characters per document.
-        maxChunkChars: 4000,
       },
     },
   }),
 })
 ```
 
-Memory writes messages to an index named `memory_messages_selfembed`. Set `semanticRecall.maxChunkChars` to 4,000 or less: Memory's default chunk size is larger than a semantic index accepts, and a longer chunk fails to save. If you configure an `embedder`, Memory sends vectors instead, as with any other store.
+Memory writes messages to an index named `memory_messages_selfembed`, and observations from observational memory to `memory_observations_selfembed`. Its default chunk size of 16,384 characters fits a semantic index. If you configure an `embedder`, Memory sends vectors instead, as with any other store.
 
 To keep each user's memory in its own partition, see [Partitions](#partitions).
 
@@ -150,7 +148,7 @@ await topk.upsert({
 })
 ```
 
-`createVectorQueryTool` works with TopK like any other store. Options under `databaseConfig.topk` are passed to `query()`, so a request can choose its partition or consistency:
+`createVectorQueryTool` works with TopK like any other store. Options under `databaseConfig.topk` are passed to `query()`, such as `consistency` or `partition`:
 
 ```typescript
 import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
@@ -165,6 +163,8 @@ const searchDocs = createVectorQueryTool({
   },
 })
 ```
+
+`createVectorQueryTool` also reads `databaseConfig` from the request context, which overrides the tool's own. If you put a `partition` there, set it on the server from the authenticated user, never from client input.
 
 For RAG with no embedding model, give the agent a tool that queries an index created without a `dimension`:
 
@@ -381,7 +381,7 @@ function memoryFor(tenantId: string) {
     memory = new Memory({
       storage,
       vector: topk.withPartition(tenantId),
-      options: { semanticRecall: { topK: 3, messageRange: 2, maxChunkChars: 4000 } },
+      options: { semanticRecall: { topK: 3, messageRange: 2 } },
     })
     memories.set(tenantId, memory)
   }
@@ -393,15 +393,21 @@ export const supportAgent = new Agent({
   name: 'Support Agent',
   instructions: 'You help customers with their orders.',
   model: '__GATEWAY_OPENAI_MODEL__',
-  memory: ({ requestContext }) => memoryFor(requestContext.get('tenantId')),
+  memory: ({ requestContext }) => {
+    const tenantId = requestContext.get('tenantId')
+    if (!tenantId) throw new Error('tenantId is required')
+    return memoryFor(tenantId)
+  },
 })
 ```
+
+Set `tenantId` on the server from the authenticated session, not from client input. Without a check like the one above, a request with no tenant would share the default partition.
 
 Deleting a partition takes about a minute to apply, and the same partition name can't be written to again for a while. See [partitions and multi-tenancy](https://docs.topk.io/concepts#multi-tenancy) in the TopK documentation.
 
 ## Read consistency
 
-By default, every read from a `TopKVector` sees that store's own latest write to the same index and partition: the store passes the write's log sequence number (LSN) to the read. Other reads use TopK's balanced consistency, where writes are visible in under a second.
+By default, every read from a `TopKVector` sees that store's own latest write to the same index and partition: the store passes the write's log sequence number (LSN) to the read. Other reads use TopK's balanced consistency, where writes are visible in under a second. A `consistency` set on the store or on a query takes precedence over this.
 
 ```typescript
 // Per query: 'indexed' (fastest, compacted data only) or 'strong' (always the latest writes)
@@ -490,7 +496,7 @@ See [read consistency](https://docs.topk.io/concepts#read-consistency) in the To
     isOptional: true,
     defaultValue: 'true',
     description:
-      "Make reads that set neither lsn nor consistency see this store's latest write to the same index and partition.",
+      "Make reads see this store's latest write to the same index and partition. Applies when neither the call nor the store sets consistency, and the call sets no lsn.",
   },
 ]}
 />
@@ -527,7 +533,7 @@ Creates a TopK collection for the index. Calling it again with compatible option
     type: "'semantic' | 'keyword' | 'none'",
     isOptional: true,
     description:
-      "Index on the text field. 'semantic' (the default without a dimension) embeds the text on the server and indexes it for BM25, up to 4,096 characters per document. 'keyword' (the default with a dimension) is BM25 only. 'none' stores the text without indexing it.",
+      "Index on the text field. 'semantic' (the default without a dimension) embeds the text on the server and indexes it for BM25. 'keyword' (the default with a dimension) is BM25 only. 'none' stores the text without indexing it.",
   },
   {
     name: 'sparse',
@@ -837,7 +843,7 @@ try {
 
 ## Limitations
 
-- A semantic index holds at most 4,096 characters of text per document. Use `textIndex: 'keyword'` for longer text you search by keyword only.
+- TopK limits the text of one document in a semantic index (32,768 characters at the time of writing). Use `textIndex: 'keyword'` for longer text you search by keyword only.
 - One query returns at most 10,000 results.
 - `$elemMatch` isn't supported, and arrays of booleans, objects or mixed types can't be filtered.
 - Writes aren't transactional: with `deleteFilter`, the delete and the write are separate requests.

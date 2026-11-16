@@ -30,7 +30,7 @@ await topk.upsert({
   metadata: [{ source: 'billing.md' }, { source: 'shipping.md' }],
 });
 
-// Semantic search, no embedding model needed
+// Semantic search, no embedding model needed (add mode: 'hybrid' for BM25 too)
 await topk.query({ indexName: 'faq', queryText: 'how long do refunds take?', topK: 3 });
 
 // BM25 keyword search
@@ -57,11 +57,9 @@ import { TopKVector } from '@mastra/topk';
 const memory = new Memory({
   storage,
   vector: new TopKVector({ id: 'topk' }),
-  options: { semanticRecall: { topK: 3, messageRange: 2, maxChunkChars: 4000 } },
+  options: { semanticRecall: { topK: 3, messageRange: 2 } },
 });
 ```
-
-A semantic index holds at most 4,096 characters per document, so keep `maxChunkChars` at 4,000 or less.
 
 ### More
 
@@ -69,7 +67,7 @@ A semantic index holds at most 4,096 characters per document, so keep `maxChunkC
 - Sparse vectors (`createIndex({ sparse: true })`) and multi-vector MaxSim search (`createIndex({ multiVector: { dimension } })`)
 - Every Mastra filter operator except `$elemMatch`, or a raw `topk-js` filter expression
 - Partitions per tenant: `topk.withPartition('acme')`, or `partition` on any call
-- Read consistency per store or per query: `consistency: 'indexed' | 'strong'`, or `lsn`. Reads see the store's own writes by default.
+- Read consistency per store or per query: `consistency: 'indexed' | 'strong'`, or `lsn`. Without one, reads see the store's own writes.
 
 See the [TopK vector store documentation](https://mastra.ai/integrations/vectors/topk) and the [TopK documentation](https://docs.topk.io).
 

@@ -297,9 +297,8 @@ describe('TopKVector', () => {
       expect(fake.lastCall('upsert')!.args[0][0].text).toBe('Refunds take 14 days.');
     });
 
-    it('rejects vectors and text a semantic index cannot hold', async () => {
+    it('rejects vectors in an index TopK embeds itself', async () => {
       await expect(store.upsert({ indexName: 'faq', vectors: [[1]] })).rejects.toThrow(/pass documents/);
-      await expect(store.upsert({ indexName: 'faq', documents: ['x'.repeat(4097)] })).rejects.toThrow(/maxChunkChars/);
       await expect(store.upsert({ indexName: 'faq', documents: [''], ids: ['a', 'b'] })).rejects.toThrow(/ids/);
     });
   });
@@ -312,12 +311,59 @@ describe('TopKVector', () => {
       fake.queryRows = [{ _id: 'a', score: 4, text: 'hello', metadata_json: '{"source":"x"}' }];
     });
 
-    it('runs semantic search for queryText alone', async () => {
+    it('runs semantic search, and only semantic search, for queryText alone', async () => {
       const results = await store.query({ indexName: 'faq', queryText: 'hi', topK: 3 });
       expect(queryModule.fn.semanticSimilarity).toHaveBeenCalledWith('text', 'hi');
+      expect(queryModule.fn.bm25Score).not.toHaveBeenCalled();
+      expect(queryModule.should).not.toHaveBeenCalled();
+      expect(results).toEqual([{ id: 'a', score: 4, document: 'hello', metadata: { source: 'x' } }]);
+    });
+
+    it('runs BM25 for queryText on an index with a keyword text index', async () => {
+      await store.query({ indexName: 'dense', queryText: 'hi' });
+      expect(queryModule.fn.bm25Score).toHaveBeenCalled();
+      expect(queryModule.fn.semanticSimilarity).not.toHaveBeenCalled();
+    });
+
+    it('adds BM25 to semantic search in hybrid mode', async () => {
+      await store.query({ indexName: 'faq', queryText: 'hi', mode: 'hybrid' });
+      expect(queryModule.fn.semanticSimilarity).toHaveBeenCalled();
       expect(queryModule.fn.bm25Score).toHaveBeenCalled();
       expect(queryModule.should).toHaveBeenCalledWith('hi', { field: 'text' });
-      expect(results).toEqual([{ id: 'a', score: 4, document: 'hello', metadata: { source: 'x' } }]);
+    });
+
+    it('combines text and vector inputs into a hybrid query', async () => {
+      await store.query({ indexName: 'dense', queryText: 'hi', queryVector: [1, 0] });
+      expect(queryModule.fn.bm25Score).toHaveBeenCalled();
+      expect(queryModule.fn.vectorDistance).toHaveBeenCalled();
+    });
+
+    it('rejects inputs the index cannot search instead of ignoring them', async () => {
+      await expect(store.query({ indexName: 'faq', sparseVector: { indices: [1], values: [1] } })).rejects.toThrow(
+        /no sparse vector field/,
+      );
+      await expect(store.query({ indexName: 'faq', multiVector: [[1]] })).rejects.toThrow(/no multi-vector field/);
+      await store.createIndex({ indexName: 'plain', dimension: 2, textIndex: 'none' });
+      await expect(store.query({ indexName: 'plain', queryText: 'hi', queryVector: [1, 0] })).rejects.toThrow(
+        /no text index/,
+      );
+      expect(fake.calls.filter(c => c.op === 'query')).toHaveLength(0);
+    });
+
+    it('reports a collection deleted elsewhere as index not found', async () => {
+      const original = fake.collection.bind(fake);
+      fake.collection = ((name: string, partition?: string) => ({
+        ...original(name, partition),
+        query: async () => {
+          throw new Error('collection not found');
+        },
+      })) as any;
+      fake.schemas.delete('faq');
+      await expect(store.query({ indexName: 'faq', queryText: 'x' })).rejects.toMatchObject({
+        id: 'MASTRA_VECTOR_TOPK_QUERY_INDEX_NOT_FOUND',
+      });
+      // The stale schema was dropped, so the next call checks again.
+      await expect(store.describeIndex({ indexName: 'faq' })).rejects.toThrow(/not found/);
     });
 
     it('runs keyword search with a required match', async () => {
@@ -327,7 +373,7 @@ describe('TopKVector', () => {
     });
 
     it('uses only the signals with a non-zero weight', async () => {
-      await store.query({ indexName: 'faq', queryText: 'hi', weights: { semantic: 1, keyword: 0 } });
+      await store.query({ indexName: 'faq', queryText: 'hi', mode: 'hybrid', weights: { semantic: 1, keyword: 0 } });
       expect(queryModule.fn.semanticSimilarity).toHaveBeenCalled();
       expect(queryModule.fn.bm25Score).not.toHaveBeenCalled();
     });
@@ -421,11 +467,43 @@ describe('TopKVector', () => {
       expect(fake.lastCall('query')!.args[1]).toEqual({ consistency: 'strong' });
     });
 
-    it('uses the store default consistency when read-your-writes is off', async () => {
-      const relaxed = new TopKVector({ id: 'r', client: fake as any, consistency: 'indexed', readYourWrites: false });
+    it("uses the store's consistency, even after a write", async () => {
+      const relaxed = new TopKVector({ id: 'r', client: fake as any, consistency: 'indexed' });
       await relaxed.upsert({ indexName: 'faq', documents: ['a'] });
       await relaxed.query({ indexName: 'faq', queryText: 'a' });
       expect(fake.lastCall('query')!.args[1]).toEqual({ consistency: 'indexed' });
+    });
+
+    it('sends no read options when read-your-writes is off', async () => {
+      const relaxed = new TopKVector({ id: 'r', client: fake as any, readYourWrites: false });
+      await relaxed.upsert({ indexName: 'faq', documents: ['a'] });
+      await relaxed.query({ indexName: 'faq', queryText: 'a' });
+      expect(fake.lastCall('query')!.args[1]).toBeUndefined();
+    });
+
+    it('keeps the highest LSN when writes finish out of order', async () => {
+      fake.lsn = 10;
+      await store.upsert({ indexName: 'faq', documents: ['a'] });
+      expect(store.lastLsn('faq')).toBe('11');
+      fake.lsn = 3;
+      await store.upsert({ indexName: 'faq', documents: ['b'] });
+      expect(store.lastLsn('faq')).toBe('11');
+    });
+
+    it('retries a read once when the LSN is not indexed in time', async () => {
+      await store.upsert({ indexName: 'faq', documents: ['a'] });
+      const original = fake.collection.bind(fake);
+      let attempts = 0;
+      fake.collection = ((name: string, partition?: string) => ({
+        ...original(name, partition),
+        query: async () => {
+          attempts++;
+          if (attempts === 1) throw new Error('QueryLsnTimeout');
+          return [];
+        },
+      })) as any;
+      await expect(store.query({ indexName: 'faq', queryText: 'a' })).resolves.toEqual([]);
+      expect(attempts).toBe(2);
     });
 
     it('routes reads and writes to a partition', async () => {
@@ -471,6 +549,54 @@ describe('TopKVector', () => {
       const [row] = fake.lastCall('upsert')!.args[0];
       expect(row.vector).toEqual([0, 1]);
       expect(JSON.parse(row.metadata_json)).toEqual({ text: 'old text', keep: false, gone: 1 });
+    });
+
+    it('keeps sparse and multi-vectors that get() returns as topk-js objects', async () => {
+      const { f32SparseVector, matrix } = await import('topk-js/data');
+      await store.createIndex({
+        indexName: 'mixed',
+        textIndex: 'keyword',
+        sparse: true,
+        multiVector: { dimension: 2 },
+      });
+      const sparse = f32SparseVector({ 3: 0.5, 9: 0.25 });
+      const multi = matrix([[1, 0]], 'f32');
+      fake.docs.set(
+        'mixed/',
+        new Map([['s1', { _id: 's1', text: 't', metadata_json: '{}', sparse_vector: sparse, multi_vector: multi }]]),
+      );
+      await store.updateVector({ indexName: 'mixed', id: 's1', update: { metadata: { a: 1 } } });
+      const [row] = fake.lastCall('upsert')!.args[0];
+      expect(row.sparse_vector).toBe(sparse);
+      expect(row.multi_vector).toBe(multi);
+    });
+
+    it('converts sparse vectors that get() returns as plain objects', async () => {
+      await store.createIndex({ indexName: 'sp', textIndex: 'keyword', sparse: true });
+      fake.docs.set(
+        'sp/',
+        new Map([['s1', { _id: 's1', text: 't', metadata_json: '{}', sparse_vector: { 3: 0.5, 9: 0.25 } }]]),
+      );
+      await store.updateVector({ indexName: 'sp', id: 's1', update: { metadata: { a: 1 } } });
+      expect(String(fake.lastCall('upsert')!.args[0][0].sparse_vector)).toMatch(/3.*9/s);
+    });
+
+    it('pages through more than 10,000 matches by id', async () => {
+      const page = (start: number, count: number) =>
+        Array.from({ length: count }, (_, i) => ({ _id: `id-${String(start + i).padStart(6, '0')}` }));
+      const pages = [page(0, 10_000), page(10_000, 3)];
+      const original = fake.collection.bind(fake);
+      let queries = 0;
+      fake.collection = ((name: string, partition?: string) => ({
+        ...original(name, partition),
+        query: async () => {
+          queries++;
+          return pages.shift() ?? [];
+        },
+      })) as any;
+      await store.updateVector({ indexName: 'dense', filter: { keep: false }, update: { metadata: { keep: true } } });
+      expect(queries).toBe(2);
+      expect(pages).toHaveLength(0);
     });
 
     it('updates every document matching a filter', async () => {
