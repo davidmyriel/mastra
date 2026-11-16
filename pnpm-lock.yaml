@@ -8520,6 +8520,52 @@ importers:
         specifier: 'catalog:'
         version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@22.19.15)(@vitest/coverage-v8@5.1.0)(@vitest/ui@5.1.0)(jsdom@30.1.3(@noble/hashes@2.4.0))(msw@2.15.0(@types/node@22.19.15)(typescript@7.0.2))(vite@8.3.5(@types/node@22.19.15)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
+  stores/topk:
+    dependencies:
+      topk-js:
+        specifier: ^0.16.1
+        version: 0.16.1
+    devDependencies:
+      '@internal/lint':
+        specifier: workspace:*
+        version: link:../../packages/_config
+      '@internal/storage-test-utils':
+        specifier: workspace:*
+        version: link:../_test-utils
+      '@internal/types-builder':
+        specifier: workspace:*
+        version: link:../../packages/_types-builder
+      '@mastra/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@mastra/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
+      '@types/node':
+        specifier: 22.19.15
+        version: 22.19.15
+      '@vitest/coverage-v8':
+        specifier: 'catalog:'
+        version: 5.1.0(vitest@5.1.0)
+      '@vitest/ui':
+        specifier: 'catalog:'
+        version: 5.1.0(vitest@5.1.0)
+      dotenv:
+        specifier: ^18.0.9
+        version: 18.0.9
+      tsdown:
+        specifier: 0.23.1
+        version: 0.23.1(oxc-resolver@11.21.2)(tsx@4.23.15)(typescript@7.0.2)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.23.15
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@22.19.15)(@vitest/coverage-v8@5.1.0)(@vitest/ui@5.1.0)(jsdom@30.1.3(@noble/hashes@2.4.0))(msw@2.15.0(@types/node@22.19.15)(typescript@7.0.2))(vite@8.3.5(@types/node@22.19.15)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
+
   stores/turbopuffer:
     dependencies:
       '@turbopuffer/turbopuffer':
@@ -31096,6 +31142,104 @@ packages:
     resolution: {integrity: sha512-EqYNA/YvUNndrA2B3O2ojzLQoTQrBxeZ9UIjQwk8t10oe6n7dwclBwd9IdZQTOKwe6vWX+AXtl6IntXRbepdxQ==}
     engines: {node: '>=20'}
 
+  topk-js-android-arm-eabi@0.16.1:
+    resolution: {integrity: sha512-Qee84e+9L3KZIynOHzq/wLQZDX8Nh0YHwTcHnKiNATyUDc83HOBCGvgkPYyjmid9eStd906iZWzx5ac1EKAkZA==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [android]
+
+  topk-js-android-arm64@0.16.1:
+    resolution: {integrity: sha512-3YwWyVK/oddQrP2l39FfpXaHaD0a53vELx7xvg//4V6Ope2C6fh2j36LK60hEfA/WK+E7aRbNwcjm9Q/vPq8Dg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [android]
+
+  topk-js-darwin-arm64@0.16.1:
+    resolution: {integrity: sha512-ESn3Bo7LIkRr3WAz5KZEtHSQZ4bkjZ3Axrz2AV8t1mqYuHANzK0D3aBBJANsWG2hvTNlW62maw8bVSma6hYdeA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  topk-js-darwin-universal@0.16.1:
+    resolution: {integrity: sha512-J8W8bWIRLl/v+jXgiQPUZWPcOsm9+vW6H914u1lm7klfGXLQkagDwvFKL8yyK4ds6lIttI/i9cc6BSZBkT7Pxg==}
+    engines: {node: '>= 10'}
+    os: [darwin]
+
+  topk-js-darwin-x64@0.16.1:
+    resolution: {integrity: sha512-2/W1ryKUQecOvtySrhJh7eVPTp2Z4iPyz6vk1RImAwRyJuUzdhkRmc6lODj0VVT/FV4mTq0JFjj82EdrEFGCkQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  topk-js-linux-arm-gnueabihf@0.16.1:
+    resolution: {integrity: sha512-7GEdvgR6mA2fyLf2vSINLfCUl6guwvN4rTBwB00uf92Eu614ZDEusoS2UVH/ZFEMLOpUV1rGi0X6GbdaVM2Wnw==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
+
+  topk-js-linux-arm-musleabihf@0.16.1:
+    resolution: {integrity: sha512-k81bi/dWRxOYRzdgL2SLeqVy5DgqUYHC0SlPnJzV3Kx50Xq78CqQmUIEf13Krq3PVKteMRIZnbhRAJ0fmMoSTg==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
+
+  topk-js-linux-arm64-gnu@0.16.1:
+    resolution: {integrity: sha512-4cczGkpy85zicbNl96RGFvw0WuCcQp919MG3XfrJ1qIR0sgdnNO+llAY0r5zFJwl9vhEAvzfTRa9scpSViB+Ng==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  topk-js-linux-arm64-musl@0.16.1:
+    resolution: {integrity: sha512-XSmZ04CyHvPlKbz7R2u5IkT+gIQNl35WrMnd/apjN1XcX1fVCVJXjbRJoG/8Gj+85/JUYF3AtI38o8MccJD2iQ==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  topk-js-linux-riscv64-gnu@0.16.1:
+    resolution: {integrity: sha512-XiVVponhRvS9r1a/uqq3tksHgQDoSvrbO+Du1MtkU8omjhk5ullzijn4d+W9N09eNTZNBoBn9r47UxR6gDTE8w==}
+    engines: {node: '>= 10'}
+    cpu: [riscv64]
+    os: [linux]
+    libc: [glibc]
+
+  topk-js-linux-x64-gnu@0.16.1:
+    resolution: {integrity: sha512-Ph2NU9qL43o5x/vSzCHQ1e9N5hUDorXrp7Egc42Dj2vPoUlTAtnZFVNPyWnWjVdXPMnUObmGF6jA9yAm58zklA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  topk-js-linux-x64-musl@0.16.1:
+    resolution: {integrity: sha512-NxX1LIKeEVwPuviRlABfozBVWIumWwA4uVq7GsgcHkxKMbDo/Q+Kar/U74+jy2xwIkGIFTBU12wmt9uwIVWEcA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  topk-js-win32-arm64-msvc@0.16.1:
+    resolution: {integrity: sha512-A0ttPS2RkvqhFmYNQxcyEVZd6LPwcB56zHOrpknxwbFl2LEH8LER6hBKeBqw1gBcGNZgknIUL8ZNR1GbcTAoTg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
+  topk-js-win32-ia32-msvc@0.16.1:
+    resolution: {integrity: sha512-3lK4wHdBx6pjWEG85a47IYVlG638vmXzZlWSEn2X9TI0SSKLtWjitTLwpVglI12+u4ZHvBJrpcuN9sOk3pwJiA==}
+    engines: {node: '>= 10'}
+    cpu: [ia32]
+    os: [win32]
+
+  topk-js-win32-x64-msvc@0.16.1:
+    resolution: {integrity: sha512-ubQdavxH1C3Q13MCJeuRgseZijw79yAmtdzEkmJ9aZha76QGcTmV3ftlDuBrEE35OZiqvpY4B8mujTanU4mDEw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  topk-js@0.16.1:
+    resolution: {integrity: sha512-Oj4FIloLsfF6l9RN+NHt14YLM0+Nbay0rLXuQeLZM94ZpIfQW4b/zMaVb0dBuMJMTTId7zujUaWg9GQLTaNGjQ==}
+    engines: {node: '>= 14'}
+
   totalist@3.0.1:
     resolution: {integrity: sha512-sf4i37nQ2LBx4m3wB74y+ubopq6W/dIzXg0FDGjsYnZHVa1Da8FH853wlL2gtUhg+xJXjfk3kUZS3BRoQeoQBQ==}
     engines: {node: '>=6'}
@@ -43946,7 +44090,7 @@ snapshots:
       '@stryker-mutator/util': 10.0.0
       semver: 7.8.6
       tslib: 2.8.1
-      vitest: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@22.19.15)(@vitest/coverage-v8@5.1.0)(@vitest/ui@5.1.0)(jsdom@30.1.3(@noble/hashes@2.4.0))(msw@2.15.0(@types/node@22.19.15)(typescript@6.0.3))(vite@8.3.5(@types/node@22.19.15)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
+      vitest: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@22.19.15)(@vitest/coverage-v8@5.1.0)(@vitest/ui@5.1.0)(jsdom@30.1.3(@noble/hashes@2.4.0))(msw@2.15.0(@types/node@22.19.15)(typescript@7.0.2))(vite@8.3.5(@types/node@22.19.15)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
   '@supabase/auth-js@2.118.0':
     dependencies:
@@ -56759,6 +56903,69 @@ snapshots:
   tokenx@1.6.0: {}
 
   toml@5.0.1: {}
+
+  topk-js-android-arm-eabi@0.16.1:
+    optional: true
+
+  topk-js-android-arm64@0.16.1:
+    optional: true
+
+  topk-js-darwin-arm64@0.16.1:
+    optional: true
+
+  topk-js-darwin-universal@0.16.1:
+    optional: true
+
+  topk-js-darwin-x64@0.16.1:
+    optional: true
+
+  topk-js-linux-arm-gnueabihf@0.16.1:
+    optional: true
+
+  topk-js-linux-arm-musleabihf@0.16.1:
+    optional: true
+
+  topk-js-linux-arm64-gnu@0.16.1:
+    optional: true
+
+  topk-js-linux-arm64-musl@0.16.1:
+    optional: true
+
+  topk-js-linux-riscv64-gnu@0.16.1:
+    optional: true
+
+  topk-js-linux-x64-gnu@0.16.1:
+    optional: true
+
+  topk-js-linux-x64-musl@0.16.1:
+    optional: true
+
+  topk-js-win32-arm64-msvc@0.16.1:
+    optional: true
+
+  topk-js-win32-ia32-msvc@0.16.1:
+    optional: true
+
+  topk-js-win32-x64-msvc@0.16.1:
+    optional: true
+
+  topk-js@0.16.1:
+    optionalDependencies:
+      topk-js-android-arm-eabi: 0.16.1
+      topk-js-android-arm64: 0.16.1
+      topk-js-darwin-arm64: 0.16.1
+      topk-js-darwin-universal: 0.16.1
+      topk-js-darwin-x64: 0.16.1
+      topk-js-linux-arm-gnueabihf: 0.16.1
+      topk-js-linux-arm-musleabihf: 0.16.1
+      topk-js-linux-arm64-gnu: 0.16.1
+      topk-js-linux-arm64-musl: 0.16.1
+      topk-js-linux-riscv64-gnu: 0.16.1
+      topk-js-linux-x64-gnu: 0.16.1
+      topk-js-linux-x64-musl: 0.16.1
+      topk-js-win32-arm64-msvc: 0.16.1
+      topk-js-win32-ia32-msvc: 0.16.1
+      topk-js-win32-x64-msvc: 0.16.1
 
   totalist@3.0.1: {}
 

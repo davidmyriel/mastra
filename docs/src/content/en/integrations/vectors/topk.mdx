@@ -1,0 +1,851 @@
+---
+title: "TopK | Vector Stores"
+description: "Use TopK with Mastra for semantic search with no embedding model, BM25 keyword and hybrid search in one query, metadata filters, partitions per tenant, and Memory semantic recall."
+packages:
+  - "@mastra/topk"
+---
+
+# TopK vector store
+
+The `TopKVector` class stores and searches documents in [TopK](https://topk.io), a search database with built-in semantic search. TopK embeds and reranks text on its servers, so you can run semantic search, and Mastra Memory semantic recall, without an embedding model or an embedding API key.
+
+One TopK query can combine semantic, BM25 keyword, dense vector, sparse vector and multi-vector scores with metadata filters, using your own weights or scoring expression. Use `TopKVector` anywhere Mastra accepts a vector store:
+
+- [Semantic search with no embedding model](#server-side-embeddings)
+- [Memory semantic recall without an embedder](#memory-semantic-recall)
+- [RAG over your own embeddings](#rag-with-your-own-embeddings), with [BM25 keyword](#keyword-search) and [hybrid search](#hybrid-search) on the same index
+- [Custom scoring](#custom-scoring), [sparse vectors](#sparse-vectors) and [multi-vector search](#multi-vector-search)
+- [Metadata filters](#metadata-filters), [partitions per tenant](#partitions) and [read consistency](#read-consistency)
+
+## Installation
+
+```bash npm2yarn
+npm install @mastra/topk@latest
+```
+
+Create an API key in the [TopK console](https://console.topk.io), and set it with your project's [region](https://docs.topk.io/regions):
+
+```bash title=".env"
+TOPK_API_KEY=your-api-key
+TOPK_REGION=aws-us-east-1-elastica
+```
+
+## Usage example
+
+The store reads `TOPK_API_KEY` and `TOPK_REGION` from the environment, or takes `apiKey` and `region` options.
+
+```typescript title="src/mastra/vector.ts"
+import { TopKVector } from '@mastra/topk'
+
+export const topk = new TopKVector({
+  id: 'topk',
+  apiKey: process.env.TOPK_API_KEY,
+  region: process.env.TOPK_REGION,
+})
+```
+
+Each Mastra index is a TopK collection. Register the store with Mastra to use it by name in tools:
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { topk } from './vector'
+
+export const mastra = new Mastra({
+  vectors: { topk },
+})
+```
+
+## Server-side embeddings
+
+Create an index without a `dimension` and TopK embeds the text itself. Pass the text as `documents` and search with `queryText`:
+
+```typescript
+await topk.createIndex({ indexName: 'faq' })
+
+await topk.upsert({
+  indexName: 'faq',
+  ids: ['refunds', 'shipping', 'warranty'],
+  documents: [
+    'Refunds are issued to the original payment method within 14 days.',
+    'Standard shipping takes 3-5 business days. Express shipping takes 1-2 days.',
+    'Every product has a two-year warranty against manufacturing defects (error code W-200).',
+  ],
+  metadata: [
+    { source: 'billing.md', year: 2024 },
+    { source: 'shipping.md', year: 2023 },
+    { source: 'warranty.md', year: 2024 },
+  ],
+})
+
+const results = await topk.query({
+  indexName: 'faq',
+  queryText: 'how long until I get my money back?',
+  topK: 2,
+})
+// [{ id: 'refunds', score: 5.2, document: 'Refunds are issued...', metadata: { source: 'billing.md', year: 2024 } }, ...]
+```
+
+The index uses TopK's `semantic_index()`, which also indexes the text for BM25, so the same index serves [keyword](#keyword-search) and [hybrid](#hybrid-search) queries. Each document holds at most 4,096 characters of text, so split longer text into chunks first. Semantic scores aren't normalized and are higher for closer matches.
+
+See the [TopK semantic search guide](https://docs.topk.io/guides/semantic-search).
+
+## Memory semantic recall
+
+`TopKVector` reports itself as a store that embeds text itself (`isSelfEmbedding`), so [semantic recall](/docs/memory/semantic-recall#server-side-embeddings) works with no `embedder`. Memory sends each message's text, and TopK embeds it on write and embeds the search string at recall time.
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { LibSQLStore } from '@mastra/libsql'
+import { Memory } from '@mastra/memory'
+import { TopKVector } from '@mastra/topk'
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'You help customers with their orders.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new LibSQLStore({ id: 'agent-storage', url: 'file:./mastra.db' }),
+    vector: new TopKVector({ id: 'topk' }),
+    options: {
+      semanticRecall: {
+        topK: 3,
+        messageRange: 2,
+        // A semantic index holds at most 4,096 characters per document.
+        maxChunkChars: 4000,
+      },
+    },
+  }),
+})
+```
+
+Memory writes messages to an index named `memory_messages_selfembed`. Set `semanticRecall.maxChunkChars` to 4,000 or less: Memory's default chunk size is larger than a semantic index accepts, and a longer chunk fails to save. If you configure an `embedder`, Memory sends vectors instead, as with any other store.
+
+To keep each user's memory in its own partition, see [Partitions](#partitions).
+
+## RAG with your own embeddings
+
+Create an index with a `dimension` to store vectors from your own embedding model. Mastra's RAG chunks keep their text in `metadata.text`. `TopKVector` also writes that text to a BM25 index, so keyword and hybrid queries work on the same pipeline.
+
+```typescript
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { MDocument } from '@mastra/rag'
+import { embedMany } from 'ai'
+
+const doc = MDocument.fromText(
+  'Refunds are issued within 14 days. Express shipping takes 1-2 days.',
+)
+const chunks = await doc.chunk({ strategy: 'recursive', maxSize: 512 })
+
+const { embeddings } = await embedMany({
+  model: new ModelRouterEmbeddingModel('__GATEWAY_OPENAI_EMBEDDING_MODEL__'),
+  values: chunks.map(chunk => chunk.text),
+})
+
+await topk.createIndex({ indexName: 'docs', dimension: 1536, metric: 'cosine' })
+await topk.upsert({
+  indexName: 'docs',
+  vectors: embeddings,
+  metadata: chunks.map(chunk => ({ text: chunk.text, source: 'policies.md' })),
+})
+```
+
+`createVectorQueryTool` works with TopK like any other store. Options under `databaseConfig.topk` are passed to `query()`, so a request can choose its partition or consistency:
+
+```typescript
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { createVectorQueryTool } from '@mastra/rag'
+
+const searchDocs = createVectorQueryTool({
+  vectorStoreName: 'topk',
+  indexName: 'docs',
+  model: new ModelRouterEmbeddingModel('__GATEWAY_OPENAI_EMBEDDING_MODEL__'),
+  databaseConfig: {
+    topk: { consistency: 'strong' },
+  },
+})
+```
+
+For RAG with no embedding model, give the agent a tool that queries an index created without a `dimension`:
+
+```typescript title="src/mastra/tools/search-faq.ts"
+import { createTool } from '@mastra/core/tools'
+import { z } from 'zod'
+import { topk } from '../vector'
+
+export const searchFaq = createTool({
+  id: 'search-faq',
+  description: 'Search the support FAQ',
+  inputSchema: z.object({ query: z.string() }),
+  execute: async ({ query }) => {
+    const results = await topk.query({
+      indexName: 'faq',
+      queryText: query,
+      mode: 'hybrid',
+      topK: 5,
+    })
+    return results.map(result => ({ text: result.document, source: result.metadata?.source }))
+  },
+})
+```
+
+See the [TopK dense vector search guide](https://docs.topk.io/guides/vector-search).
+
+## Keyword search
+
+Set `mode: 'keyword'` for BM25 keyword search. Only documents that contain a query term are returned, which suits exact terms such as product names and error codes. Set `keywordMatchAll: true` to require every term.
+
+```typescript
+const results = await topk.query({ indexName: 'faq', queryText: 'W-200', mode: 'keyword' })
+// [{ id: 'warranty', ... }]
+```
+
+Keyword search works on indexes created without a `dimension`, and on indexes with one: their `text` field gets a keyword index by default. Pass `textIndex: 'keyword'` to `createIndex()` for BM25 alone, with no length limit on the text.
+
+See the [TopK keyword search guide](https://docs.topk.io/guides/keyword-search).
+
+## Hybrid search
+
+A hybrid query adds up weighted scores in one TopK query, filtered by the same metadata filter. Each signal needs its input:
+
+| Signal | Input |
+| - | - |
+| `semantic` | `queryText`, on an index created without a `dimension` |
+| `keyword` | `queryText`, or `keywordQuery` for a different BM25 query |
+| `vector` | `queryVector` |
+| `sparse` | `sparseVector` |
+| `multiVector` | `multiVector` |
+
+```typescript
+const results = await topk.query({
+  indexName: 'faq',
+  queryText: 'express delivery',
+  mode: 'hybrid',
+  weights: { semantic: 0.7, keyword: 0.3 },
+  filter: { year: { $gte: 2023 } },
+  topK: 5,
+})
+```
+
+Without `weights`, every signal the query has input for gets weight 1. A query that passes both `queryText` and `queryVector` is hybrid even without `mode`. In a hybrid query the keyword score boosts documents that contain query terms, without dropping the ones that don't.
+
+Semantic and BM25 scores have different ranges (for example, semantic about 1-5 and BM25 about 0-15), so print a few real scores before you pick weights.
+
+See the [TopK true hybrid search guide](https://docs.topk.io/guides/true-hybrid-search).
+
+## Custom scoring
+
+Pass `scoring` to rank by any TopK expression. It receives the score of each signal the query has input for, and returns the expression to sort by, highest first. Use `metadataField()` to refer to metadata:
+
+```typescript
+import { metadataField } from '@mastra/topk'
+
+const results = await topk.query({
+  indexName: 'faq',
+  queryText: 'refund',
+  scoring: s =>
+    s.semantic!.add(s.keyword!.mul(0.2)).boost(metadataField('source').eq('billing.md'), 1.5),
+})
+```
+
+The result's `score` is the value of your expression. See the [TopK query documentation](https://docs.topk.io/collections/query) for every function you can use, such as `boost`, `coalesce`, `choose`, `min` and `max`.
+
+## Sparse vectors
+
+Create the index with `sparse: true` to store sparse vectors, for example from SPLADE. TopK searches them exactly, with 100% recall. Sparse vectors use Mastra's `{ indices, values }` shape:
+
+```typescript
+await topk.createIndex({ indexName: 'sparse-docs', textIndex: 'keyword', sparse: true })
+
+await topk.upsert({
+  indexName: 'sparse-docs',
+  documents: ['Rust memory safety', 'Python readable syntax'],
+  sparseVectors: [
+    { indices: [17, 2041], values: [0.8, 0.4] },
+    { indices: [5, 911], values: [0.6, 0.9] },
+  ],
+})
+
+const results = await topk.query({
+  indexName: 'sparse-docs',
+  sparseVector: { indices: [2041], values: [1] },
+})
+```
+
+See the [TopK sparse vector search guide](https://docs.topk.io/guides/sparse-vector-search).
+
+## Multi-vector search
+
+Create the index with `multiVector: { dimension }` for late-interaction (ColBERT-style) retrieval. Each document is a matrix with one row per token, and TopK scores it with MaxSim:
+
+```typescript
+await topk.createIndex({
+  indexName: 'colbert-docs',
+  textIndex: 'keyword',
+  multiVector: { dimension: 4 },
+})
+
+await topk.upsert({
+  indexName: 'colbert-docs',
+  documents: ['Rust memory safety', 'Python readable syntax'],
+  multiVectors: [
+    [
+      [0.1, 0.9, 0, 0],
+      [0.8, 0.2, 0, 0],
+    ],
+    [[0, 0, 0.7, 0.7]],
+  ],
+})
+
+const results = await topk.query({
+  indexName: 'colbert-docs',
+  multiVector: [[0.1, 0.9, 0, 0]],
+})
+```
+
+See the [TopK multi-vector search guide](https://docs.topk.io/guides/multi-vector-search).
+
+## Metadata filters
+
+`TopKVector` translates [Mastra's metadata filters](/reference/rag/metadata-filters) into TopK filter expressions, which run in the same query as the search:
+
+| Mastra | TopK |
+| - | - |
+| `{ field: value }`, `$eq` | `field("metadata.field") == value`, or an element of an array field |
+| `$ne` | Not equal, for documents that have the field |
+| `$gt`, `$gte`, `$lt`, `$lte` | Comparison on numbers, strings and dates (as ISO strings) |
+| `$in`, `$nin` | One of the values, or an array field holding one of them |
+| `$all` | An array field holding every value |
+| `$size` | An array field with that many elements |
+| `$contains` | A substring of a string field, or an element of an array field |
+| `$regex`, `$options` | `regexp_match`, with flags such as `i` |
+| `$exists` | Whether the metadata key is present, even when its value is `null` |
+| `$and`, `$or`, `$not`, `$nor` | Logical operators, at the top level and nested |
+
+```typescript
+const results = await topk.query({
+  indexName: 'faq',
+  queryText: 'money back',
+  filter: {
+    $and: [{ source: { $in: ['billing.md', 'terms.md'] } }, { year: { $gte: 2023 } }],
+  },
+})
+```
+
+Nested metadata is filtered by dot path, such as `{ 'author.name': 'Ada' }`. A filter can also be a TopK expression built with `topk-js/query`, which is passed through unchanged:
+
+```typescript
+import { metadataField } from '@mastra/topk'
+
+const results = await topk.query({
+  indexName: 'faq',
+  queryText: 'money back',
+  filter: metadataField('year').gte(2023).and(metadataField('source').startsWith('bill')),
+})
+```
+
+`$elemMatch` isn't supported, because TopK can't filter on the elements of an array of objects. Arrays of booleans, of objects, or of mixed types are returned in results but can't be filtered.
+
+## Partitions
+
+Partitions are isolated sub-collections inside one index: a query never returns another partition's documents. Use one partition per tenant when tenants must not see each other's data. Partitions are created on first write, and a partition that was never written reads as empty.
+
+```typescript
+const acme = topk.withPartition('acme')
+await acme.upsert({ indexName: 'faq', documents: ['Acme ships within 24 hours.'] })
+
+const results = await acme.query({ indexName: 'faq', queryText: 'how fast do you ship?' })
+
+// Or per call:
+await topk.query({ indexName: 'faq', queryText: 'how fast do you ship?', partition: 'globex' })
+
+await topk.listPartitions({ indexName: 'faq' }) // ['acme', ...]
+await topk.deletePartition({ indexName: 'faq', partition: 'acme' })
+```
+
+`withPartition()` returns a store that shares the client and settings and makes no network calls. To give each tenant's agent memory its own partition, resolve `memory` from the request:
+
+```typescript title="src/mastra/agents/support-agent.ts"
+import { Agent } from '@mastra/core/agent'
+import { LibSQLStore } from '@mastra/libsql'
+import { Memory } from '@mastra/memory'
+import { TopKVector } from '@mastra/topk'
+
+const storage = new LibSQLStore({ id: 'agent-storage', url: 'file:./mastra.db' })
+const topk = new TopKVector({ id: 'topk' })
+const memories = new Map<string, Memory>()
+
+function memoryFor(tenantId: string) {
+  let memory = memories.get(tenantId)
+  if (!memory) {
+    memory = new Memory({
+      storage,
+      vector: topk.withPartition(tenantId),
+      options: { semanticRecall: { topK: 3, messageRange: 2, maxChunkChars: 4000 } },
+    })
+    memories.set(tenantId, memory)
+  }
+  return memory
+}
+
+export const supportAgent = new Agent({
+  id: 'support-agent',
+  name: 'Support Agent',
+  instructions: 'You help customers with their orders.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: ({ requestContext }) => memoryFor(requestContext.get('tenantId')),
+})
+```
+
+Deleting a partition takes about a minute to apply, and the same partition name can't be written to again for a while. See [partitions and multi-tenancy](https://docs.topk.io/concepts#multi-tenancy) in the TopK documentation.
+
+## Read consistency
+
+By default, every read from a `TopKVector` sees that store's own latest write to the same index and partition: the store passes the write's log sequence number (LSN) to the read. Other reads use TopK's balanced consistency, where writes are visible in under a second.
+
+```typescript
+// Per query: 'indexed' (fastest, compacted data only) or 'strong' (always the latest writes)
+await topk.query({ indexName: 'faq', queryText: 'refunds', consistency: 'strong' })
+
+// Read at least up to a write, from any process
+const lsn = topk.lastLsn('faq')
+await topk.query({ indexName: 'faq', queryText: 'refunds', lsn })
+
+// Per store
+const fast = new TopKVector({ id: 'topk-fast', consistency: 'indexed', readYourWrites: false })
+```
+
+See [read consistency](https://docs.topk.io/concepts#read-consistency) in the TopK documentation.
+
+## Constructor options
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Unique identifier for this vector store instance.',
+  },
+  {
+    name: 'apiKey',
+    type: 'string',
+    isOptional: true,
+    defaultValue: 'process.env.TOPK_API_KEY',
+    description: 'TopK API key. Create one in the TopK console.',
+  },
+  {
+    name: 'region',
+    type: 'string',
+    isOptional: true,
+    defaultValue: 'process.env.TOPK_REGION',
+    description: "Region of your TopK project, for example 'aws-us-east-1-elastica'.",
+  },
+  {
+    name: 'host',
+    type: 'string',
+    isOptional: true,
+    description: 'Custom TopK host. Leave unset for TopK cloud.',
+  },
+  {
+    name: 'https',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description: 'Whether to connect over HTTPS.',
+  },
+  {
+    name: 'retryConfig',
+    type: 'RetryConfig',
+    isOptional: true,
+    description: 'Retry settings for the TopK client: maxRetries, timeout and backoff.',
+  },
+  {
+    name: 'client',
+    type: 'Client',
+    isOptional: true,
+    description: 'An existing topk-js client to use instead of apiKey and region.',
+  },
+  {
+    name: 'indexPrefix',
+    type: 'string',
+    isOptional: true,
+    description:
+      "Prefix added to every index name to form the collection name, for example 'staging-'. listIndexes() returns only collections with this prefix, without it. Use it to share one TopK project between apps or environments.",
+  },
+  {
+    name: 'partition',
+    type: 'string',
+    isOptional: true,
+    description: "Partition used by every call that doesn't pass its own partition.",
+  },
+  {
+    name: 'consistency',
+    type: "'indexed' | 'strong'",
+    isOptional: true,
+    description: "Default read consistency. Leave unset for TopK's balanced consistency.",
+  },
+  {
+    name: 'readYourWrites',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'true',
+    description:
+      "Make reads that set neither lsn nor consistency see this store's latest write to the same index and partition.",
+  },
+]}
+/>
+
+## Methods
+
+### `createIndex()`
+
+Creates a TopK collection for the index. Calling it again with compatible options does nothing, and incompatible options throw an error.
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Name of the index to create.',
+  },
+  {
+    name: 'dimension',
+    type: 'number',
+    isOptional: true,
+    description:
+      'Dense vector dimension, up to 16,384. Leave it out to create an index TopK embeds itself: pass documents to upsert() and queryText to query().',
+  },
+  {
+    name: 'metric',
+    type: "'cosine' | 'euclidean' | 'dotproduct'",
+    isOptional: true,
+    defaultValue: 'cosine',
+    description: 'Distance metric for dense vectors. Requires a dimension.',
+  },
+  {
+    name: 'textIndex',
+    type: "'semantic' | 'keyword' | 'none'",
+    isOptional: true,
+    description:
+      "Index on the text field. 'semantic' (the default without a dimension) embeds the text on the server and indexes it for BM25, up to 4,096 characters per document. 'keyword' (the default with a dimension) is BM25 only. 'none' stores the text without indexing it.",
+  },
+  {
+    name: 'sparse',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: 'Add a sparse vector field.',
+  },
+  {
+    name: 'multiVector',
+    type: '{ dimension: number }',
+    isOptional: true,
+    description: 'Add a multi-vector field, scored with MaxSim. The dimension is at most 1,024.',
+  },
+]}
+/>
+
+### `upsert()`
+
+Inserts or replaces documents and returns their IDs. Pass `vectors`, `documents`, or both.
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Name of the index to write to.',
+  },
+  {
+    name: 'vectors',
+    type: 'number[][]',
+    isOptional: true,
+    description: 'Dense vectors, for an index created with a dimension.',
+  },
+  {
+    name: 'documents',
+    type: 'string[]',
+    isOptional: true,
+    description:
+      'Text of each document. In an index without a dimension, TopK embeds it. When left out, a string metadata.text is used.',
+  },
+  {
+    name: 'metadata',
+    type: 'Record<string, any>[]',
+    isOptional: true,
+    description: 'Metadata for each document.',
+  },
+  {
+    name: 'ids',
+    type: 'string[]',
+    isOptional: true,
+    description: 'Document IDs. Random UUIDs are used when left out. A document with an existing ID is replaced.',
+  },
+  {
+    name: 'sparseVectors',
+    type: '{ indices: number[]; values: number[] }[]',
+    isOptional: true,
+    description: 'Sparse vectors, for an index created with sparse: true.',
+  },
+  {
+    name: 'multiVectors',
+    type: 'number[][][]',
+    isOptional: true,
+    description: 'Multi-vector matrices, for an index created with multiVector.',
+  },
+  {
+    name: 'deleteFilter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description:
+      'Delete the documents matching this filter before writing, for example to replace every chunk of a file. The delete and the write are separate requests, not one transaction.',
+  },
+  {
+    name: 'partition',
+    type: 'string',
+    isOptional: true,
+    description: "Partition to write to. Defaults to the store's partition.",
+  },
+]}
+/>
+
+### `query()`
+
+Searches an index. The search mode is inferred from the inputs unless `mode` or `scoring` is given. With only a `filter`, the query lists matching documents with a score of 0.
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Name of the index to query.',
+  },
+  {
+    name: 'queryText',
+    type: 'string',
+    isOptional: true,
+    description: 'Natural-language query, for semantic search and BM25.',
+  },
+  {
+    name: 'queryVector',
+    type: 'number[]',
+    isOptional: true,
+    description: 'Dense query vector.',
+  },
+  {
+    name: 'sparseVector',
+    type: '{ indices: number[]; values: number[] }',
+    isOptional: true,
+    description: 'Sparse query vector.',
+  },
+  {
+    name: 'multiVector',
+    type: 'number[][]',
+    isOptional: true,
+    description: 'Query matrix for multi-vector search.',
+  },
+  {
+    name: 'mode',
+    type: "'semantic' | 'keyword' | 'vector' | 'sparse' | 'multiVector' | 'hybrid'",
+    isOptional: true,
+    description: "Search mode. Defaults to the only signal with input, or 'hybrid' when there are several.",
+  },
+  {
+    name: 'weights',
+    type: 'Partial<Record<Signal, number>>',
+    isOptional: true,
+    description: 'Hybrid weights by signal, for example { semantic: 0.7, keyword: 0.3 }.',
+  },
+  {
+    name: 'scoring',
+    type: '(signals) => Expression',
+    isOptional: true,
+    description: 'Custom scoring expression to rank by, highest first.',
+  },
+  {
+    name: 'keywordQuery',
+    type: 'string',
+    isOptional: true,
+    description: 'BM25 query, when it should differ from queryText.',
+  },
+  {
+    name: 'keywordMatchAll',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: 'In keyword mode, require every query term.',
+  },
+  {
+    name: 'topK',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '10',
+    description: 'Number of results, up to 10,000.',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any> | LogicalExpression',
+    isOptional: true,
+    description: 'Metadata filter, or a TopK filter expression.',
+  },
+  {
+    name: 'includeVector',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description: "Include each result's dense vector.",
+  },
+  {
+    name: 'partition',
+    type: 'string',
+    isOptional: true,
+    description: "Partition to search. Defaults to the store's partition.",
+  },
+  {
+    name: 'consistency',
+    type: "'indexed' | 'strong'",
+    isOptional: true,
+    description: 'Read consistency for this query.',
+  },
+  {
+    name: 'lsn',
+    type: 'string',
+    isOptional: true,
+    description: 'Read at least up to this write. Takes precedence over consistency.',
+  },
+]}
+/>
+
+### `listIndexes()`
+
+Returns the names of the indexes in the project, without the `indexPrefix`.
+
+### `describeIndex()`
+
+Returns the index dimension, metric and the number of documents in one partition. An index TopK embeds itself has a `dimension` of 0. Accepts `indexName` and optionally `partition`, `consistency` and `lsn`.
+
+```typescript
+interface IndexStats {
+  dimension: number
+  count: number
+  metric?: 'cosine' | 'euclidean' | 'dotproduct'
+}
+```
+
+### `deleteIndex()`
+
+Deletes the index's collection, with every partition. Deleting an index that doesn't exist succeeds. For about a minute after a delete, writes to an index recreated under the same name can be lost, so use a new name instead.
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Name of the index to delete.',
+  },
+]}
+/>
+
+### `updateVector()`
+
+Updates one document by `id`, or every document matching `filter`. New metadata replaces the old metadata. A new `document` replaces the text, which TopK embeds again in an index without a dimension.
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Name of the index.',
+  },
+  {
+    name: 'id',
+    type: 'string',
+    isOptional: true,
+    description: 'ID of the document to update. Mutually exclusive with filter.',
+  },
+  {
+    name: 'filter',
+    type: 'Record<string, any>',
+    isOptional: true,
+    description: 'Metadata filter selecting the documents to update. Mutually exclusive with id.',
+  },
+  {
+    name: 'update',
+    type: '{ vector?: number[]; metadata?: Record<string, any>; document?: string }',
+    description: 'The new vector, metadata or text.',
+  },
+  {
+    name: 'partition',
+    type: 'string',
+    isOptional: true,
+    description: "Partition to update. Defaults to the store's partition.",
+  },
+]}
+/>
+
+### `deleteVector()`
+
+Deletes one document by `id`. Accepts `indexName`, `id` and optionally `partition`.
+
+### `deleteVectors()`
+
+Deletes documents by `ids`, or every document matching `filter`, in one request. Pass one of them, not both. Accepts an optional `partition`.
+
+### `listPartitions()` and `deletePartition()`
+
+`listPartitions({ indexName })` returns the names of an index's partitions. `deletePartition({ indexName, partition })` deletes a partition and all of its documents.
+
+### `withPartition()`
+
+`withPartition(partition)` returns a store scoped to another partition. It shares this store's client and settings.
+
+### `lastLsn()`
+
+`lastLsn(indexName, partition?)` returns the LSN of this store's latest write to an index and partition. Pass it as `lsn` to read that write from another process.
+
+## Response types
+
+```typescript
+interface QueryResult {
+  id: string
+  score: number
+  metadata?: Record<string, any>
+  document?: string // The document's text
+  vector?: number[] // Only included if includeVector is true
+}
+```
+
+Scores are higher-is-better. For euclidean vector search, the score is `1 / (1 + distance)`.
+
+## Error handling
+
+The store throws `MastraError` instances from `@mastra/core/error`. Invalid input has the `USER` category, and errors returned by TopK have the `THIRD_PARTY` category unless they come from invalid input.
+
+```typescript
+import { MastraError } from '@mastra/core/error'
+
+try {
+  await topk.query({ indexName: 'faq', queryText: 'refunds' })
+} catch (error) {
+  if (error instanceof MastraError) {
+    console.log(error.id) // for example 'MASTRA_VECTOR_TOPK_QUERY_INDEX_NOT_FOUND'
+    console.log(error.category) // 'USER' or 'THIRD_PARTY'
+    console.log(error.details) // { indexName: 'faq' }
+  }
+}
+```
+
+## Limitations
+
+- A semantic index holds at most 4,096 characters of text per document. Use `textIndex: 'keyword'` for longer text you search by keyword only.
+- One query returns at most 10,000 results.
+- `$elemMatch` isn't supported, and arrays of booleans, objects or mixed types can't be filtered.
+- Writes aren't transactional: with `deleteFilter`, the delete and the write are separate requests.
+- Don't delete and recreate an index under the same name within a minute.
+
+## Related
+
+- [TopK documentation](https://docs.topk.io)
+- [TopK console](https://console.topk.io)
+- [Metadata filters](/reference/rag/metadata-filters)
+- [Semantic recall](/docs/memory/semantic-recall)

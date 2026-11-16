@@ -1186,6 +1186,14 @@ const sidebars = {
         },
         {
           type: 'doc',
+          id: 'vectors/topk',
+          label: 'TopK',
+          customProps: {
+            icon: 'https://www.topk.io/brand/k.png',
+          },
+        },
+        {
+          type: 'doc',
           id: 'vectors/turbopuffer',
           label: 'Turbopuffer',
           customProps: {

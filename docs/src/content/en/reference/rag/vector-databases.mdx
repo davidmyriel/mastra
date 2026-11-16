@@ -401,6 +401,46 @@ After generating embeddings, you need to store them in a database that supports 
     ```
   </TabItem>
 
+  <TabItem value="topk" label="TopK">
+    ```ts title="vector-store.ts"
+    import { TopKVector } from '@mastra/topk'
+
+    const store = new TopKVector({
+      id: 'topk-vector',
+      apiKey: process.env.TOPK_API_KEY,
+      region: process.env.TOPK_REGION,
+    })
+
+    // With your own embeddings
+    await store.createIndex({
+      indexName: 'my-collection',
+      dimension: 1536,
+    })
+
+    await store.upsert({
+      indexName: 'my-collection',
+      vectors: embeddings,
+      metadata: chunks.map(chunk => ({ text: chunk.text })),
+    })
+
+    // Or let TopK embed the text: create the index without a dimension
+    await store.createIndex({ indexName: 'my-documents' })
+
+    await store.upsert({
+      indexName: 'my-documents',
+      documents: chunks.map(chunk => chunk.text),
+    })
+    ```
+
+    <h3>Key features</h3>
+
+    - Server-side embeddings: semantic search with no embedding model
+    - BM25 keyword and hybrid search in one query, with metadata filters
+    - Partitions for per-tenant isolation
+
+    See the [TopK vector store page](/integrations/vectors/topk) for every option.
+  </TabItem>
+
   <TabItem value="couchbase" label="Couchbase">
     ```ts title="vector-store.ts"
     import { CouchbaseVector } from '@mastra/couchbase'

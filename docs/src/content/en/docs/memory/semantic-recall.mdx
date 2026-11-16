@@ -64,7 +64,7 @@ After getting a response from the LLM, all new messages (user, assistant, and to
 
 ## Quickstart
 
-Semantic recall is disabled by default. To enable it, set `semanticRecall: true` in `options` and provide a `vector` store and an `embedder`. A store that generates embeddings itself, such as MongoDB with Automated Embedding, works without one. See [Server-side embeddings](#server-side-embeddings).
+Semantic recall is disabled by default. To enable it, set `semanticRecall: true` in `options` and provide a `vector` store and an `embedder`. A store that generates embeddings itself, such as TopK or MongoDB with Automated Embedding, works without one. See [Server-side embeddings](#server-side-embeddings).
 
 <Tabs>
   <TabItem value="libsql" label="LibSQL" default>
@@ -199,6 +199,7 @@ Each vector store page below includes installation instructions, configuration p
 - [PostgreSQL](/integrations/vectors/pg)
 - [Qdrant](/integrations/vectors/qdrant)
 - [S3 Vectors](/integrations/vectors/s3vectors)
+- [TopK](/integrations/vectors/topk)
 - [Turbopuffer](/integrations/vectors/turbopuffer)
 - [Upstash](/integrations/vectors/upstash)
 
@@ -348,6 +349,22 @@ const memory = new Memory({
 Messages are stored as text and MongoDB embeds them, so the model choice and the vector size belong to the index rather than to your application. Recall works the same way through an agent and through [`recall()`](#using-the-recall-method).
 
 MongoDB embeds newly written messages in the background. A message saved moments ago may not be recallable immediately.
+
+[TopK](/integrations/vectors/topk) embeds text on its servers by default, so a `TopKVector` needs no model option. A semantic index holds at most 4,096 characters per document, so set `maxChunkChars` to 4,000 or less:
+
+```typescript title="src/mastra/agents/index.ts"
+import { LibSQLStore } from '@mastra/libsql'
+import { Memory } from '@mastra/memory'
+import { TopKVector } from '@mastra/topk'
+
+const memory = new Memory({
+  storage: new LibSQLStore({ id: 'agent-storage', url: 'file:./mastra.db' }),
+  vector: new TopKVector({ id: 'agent-vector' }),
+  options: {
+    semanticRecall: { topK: 3, messageRange: 2, maxChunkChars: 4000 },
+  },
+})
+```
 
 Every other store expects your application to supply the vectors, and keeps requiring an `embedder`. Enabling semantic recall with neither an `embedder` nor a store that embeds server-side raises an error naming both options.
 

@@ -81,7 +81,7 @@ jobs:
           # Test tiers: stores marked `out` that this PR doesn't touch (decided in Prebuild).
           STORES=$(jq -c -n --argjson all "$STORES" --argjson skip "$SKIP_JOBS" '[$all[] | select(("job:store/" + .) as $k | $skip | index($k) | not)]')
 
-          LIGHT='["azure-ai-search","convex","dsql","duckdb","lance","oracledb","s3vectors","spanner","turbopuffer","turso"]'
+          LIGHT='["azure-ai-search","convex","dsql","duckdb","lance","oracledb","s3vectors","spanner","topk","turbopuffer","turso"]'
           LIGHT_STORES=$(jq -c -n --argjson all "$STORES" --argjson light "$LIGHT" '[$all[] | select(. as $s | $light | index($s))]')
           STORES=$(jq -c -n --argjson all "$STORES" --argjson light "$LIGHT" '[$all[] | select(. as $s | $light | index($s) | not)]')
 
